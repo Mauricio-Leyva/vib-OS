@@ -14,7 +14,7 @@
 #define ASLR_STACK_BITS 12 /* 4KB * 4096 = 16MB randomization */
 #define ASLR_HEAP_BITS 12  /* 16MB heap randomization */
 #define ASLR_MMAP_BITS 16  /* 64K * 64KB = 4GB randomization for mmap */
-#define ASLR_EXEC_BITS 16  /* Executable base randomization */
+#define ASLR_EXEC_BITS 8   /* Executable base randomization (max ~16MB, must stay within 2GB mapped RAM) */
 
 /* Initialize ASLR with entropy from hardware timer */
 void aslr_init(void);

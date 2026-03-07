@@ -282,6 +282,13 @@ test: kernel
 # Run in QEMU
 # ============================================================================
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+  QEMU_AUDIO ?= none
+else
+  QEMU_AUDIO ?= coreaudio
+endif
+
 run: kernel
 	@echo "[RUN] Starting Vib-OS in QEMU..."
 	@qemu-system-aarch64 -M virt,gic-version=3 -cpu max -m 4G -nographic -kernel $(KERNEL_BINARY)
@@ -296,7 +303,7 @@ run-gui: kernel
 		-device virtio-tablet-device \
 		-device virtio-net-device,netdev=net0 \
 		-netdev user,id=net0 \
-		-audiodev coreaudio,id=snd0 \
+		-audiodev $(QEMU_AUDIO),id=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
 		-serial stdio \
 		-kernel $(KERNEL_BINARY)
@@ -312,7 +319,7 @@ run-gpu: kernel
 		-device virtio-tablet-device \
 		-device virtio-net-device,netdev=net0 \
 		-netdev user,id=net0 \
-		-audiodev coreaudio,id=snd0 \
+		-audiodev $(QEMU_AUDIO),id=snd0 \
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
 		-serial stdio \
 		-kernel $(KERNEL_BINARY)

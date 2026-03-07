@@ -11,6 +11,8 @@ CFLAGS = $(TARGET) \
          -ffreestanding \
          -fno-builtin \
          -nostdinc \
+         -fno-stack-protector \
+         -fPIC \
          -I./include \
          -O2 -Wall -Wextra
 
