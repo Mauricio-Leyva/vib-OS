@@ -438,7 +438,7 @@ static void start_init_process(void) {
    * the system to hang. TODO: implement proper syscall handlers before
    * re-enabling init.
    */
-  printk(KERN_INFO "Skipping /sbin/init (GUI runs in kernel mode)\\n");
+  printk(KERN_INFO "Skipping /sbin/init (GUI runs in kernel mode)\n");
 
   printk(KERN_INFO "System ready.\n\n");
 

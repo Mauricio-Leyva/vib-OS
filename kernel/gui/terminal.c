@@ -109,7 +109,6 @@ struct terminal {
 #define TERM_HISTORY_LEN 128
   char history[32][128];
   int history_count;
-  int history_browse;           /* Index when browsing with arrow keys */
 };
 
 static struct terminal *active_terminal = NULL;
@@ -1301,7 +1300,8 @@ struct terminal *term_create(int x, int y, int cols, int rows) {
   term->sb_head = 0;
   term->scroll_offset = 0;
 
-  if (!term->chars || !term->fg_colors || !term->bg_colors) {
+  if (!term->chars || !term->fg_colors || !term->bg_colors ||
+      !term->sb_chars || !term->sb_fg || !term->sb_bg) {
     if (term->chars)
       kfree(term->chars);
     if (term->fg_colors)
@@ -1319,12 +1319,10 @@ struct terminal *term_create(int x, int y, int cols, int rows) {
   }
 
   /* Initialize scrollback to spaces */
-  if (term->sb_chars) {
-    for (size_t i = 0; i < sb_size; i++) {
-      term->sb_chars[i] = ' ';
-      term->sb_fg[i] = 7;
-      term->sb_bg[i] = 0;
-    }
+  for (size_t i = 0; i < sb_size; i++) {
+    term->sb_chars[i] = ' ';
+    term->sb_fg[i] = 7;
+    term->sb_bg[i] = 0;
   }
 
   /* Initialize */
@@ -1342,7 +1340,6 @@ struct terminal *term_create(int x, int y, int cols, int rows) {
   term->content_w = cols * TERM_CHAR_W + TERM_PADDING * 2;
   term->content_h = rows * TERM_CHAR_H + TERM_PADDING * 2;
   term->history_count = 0;
-  term->history_browse = 0;
 
   /* Init CWD */
   term->cwd[0] = '/';
@@ -1357,7 +1354,7 @@ struct terminal *term_create(int x, int y, int cols, int rows) {
   term_puts(term, "\033[1;36mVib-OS Terminal v2.0\033[0m\n");
   term_puts(term, "Type '\033[33mhelp\033[0m' for commands, "
                   "'\033[33mneofetch\033[0m' for system info.\n");
-  term_puts(term, "Use \033[33mArrow Up/Down\033[0m to scroll history.\n\n");
+  term_puts(term, "Use \033[33mArrow Up/Down\033[0m to scroll back.\n\n");
   term_puts(term, "\033[32mvib-os\033[0m:\033[34m~\033[0m$ ");
 
   printk(KERN_INFO "TERM: Created terminal %dx%d (scrollback: %d lines)\n", cols, rows, TERM_SCROLLBACK_LINES);
@@ -1375,6 +1372,12 @@ void term_destroy(struct terminal *term) {
     kfree(term->fg_colors);
   if (term->bg_colors)
     kfree(term->bg_colors);
+  if (term->sb_chars)
+    kfree(term->sb_chars);
+  if (term->sb_fg)
+    kfree(term->sb_fg);
+  if (term->sb_bg)
+    kfree(term->sb_bg);
   kfree(term);
 }
 
@@ -1427,52 +1430,65 @@ void term_resize(struct terminal *t, int pixel_w, int pixel_h) {
 
   int cc = new_cols < t->cols ? new_cols : t->cols;
 
-  /* 1. If width changed, we must reallocate and migrate scrollback first */
-  if (new_cols != t->cols && t->sb_chars) {
-    size_t ss = (size_t)TERM_SCROLLBACK_LINES * new_cols;
-    char *nsbc = kmalloc(ss);
-    uint8_t *nsbf = kmalloc(ss);
-    uint8_t *nsbb = kmalloc(ss);
-    
-    if (nsbc) {
-      /* Fill with blank spaces */
-      for (size_t i = 0; i < ss; i++) {
-        nsbc[i] = ' '; nsbf[i] = 7; nsbb[i] = 0;
-      }
-      /* Compact and copy old scrollback into the new width format */
-      for (int i = 0; i < t->sb_count; i++) {
-        int old_idx = (t->sb_head - t->sb_count + i);
-        while (old_idx < 0) old_idx += TERM_SCROLLBACK_LINES;
-        old_idx %= TERM_SCROLLBACK_LINES;
-        
-        for (int c = 0; c < cc; c++) {
-          nsbc[i * new_cols + c] = t->sb_chars[old_idx * t->cols + c];
-          nsbf[i * new_cols + c] = t->sb_fg[old_idx * t->cols + c];
-          nsbb[i * new_cols + c] = t->sb_bg[old_idx * t->cols + c];
-        }
-      }
-      kfree(t->sb_chars); kfree(t->sb_fg); kfree(t->sb_bg);
-      t->sb_chars = nsbc;
-      t->sb_fg = nsbf;
-      t->sb_bg = nsbb;
-      t->sb_head = t->sb_count % TERM_SCROLLBACK_LINES;
-    }
-  }
-
-  /* 2. Allocate new visible screen buffer */
+  /* 1. Allocate new visible screen buffer */
   size_t new_size = (size_t)new_cols * new_rows;
   char *nc = kmalloc(new_size);
   uint8_t *nfg = kmalloc(new_size);
   uint8_t *nbg = kmalloc(new_size);
-  if (!nc || !nfg || !nbg) {
-    if (nc) kfree(nc); if (nfg) kfree(nfg); if (nbg) kfree(nbg);
-    return;
+
+  /* 2. If width changed, allocate new scrollback buffers */
+  char *nsbc = NULL;
+  uint8_t *nsbf = NULL;
+  uint8_t *nsbb = NULL;
+  if (new_cols != t->cols && t->sb_chars) {
+    size_t ss = (size_t)TERM_SCROLLBACK_LINES * new_cols;
+    nsbc = kmalloc(ss);
+    nsbf = kmalloc(ss);
+    nsbb = kmalloc(ss);
   }
+
+  /* 3. Check for any allocation failures */
+  bool failed = (!nc || !nfg || !nbg);
+  if (new_cols != t->cols && t->sb_chars && (!nsbc || !nsbf || !nsbb)) {
+    failed = true;
+  }
+
+  if (failed) {
+    if (nc) kfree(nc); if (nfg) kfree(nfg); if (nbg) kfree(nbg);
+    if (nsbc) kfree(nsbc); if (nsbf) kfree(nsbf); if (nsbb) kfree(nsbb);
+    return; /* Keep old terminal buffers entirely intact */
+  }
+
+  /* 4. Fill visible buffer */
   for (size_t i = 0; i < new_size; i++) {
     nc[i] = ' '; nfg[i] = 7; nbg[i] = 0;
   }
 
-  /* 3. Handle growing/shrinking height */
+  /* 5. Migrate scrollback to new dimensions if necessary */
+  if (new_cols != t->cols && t->sb_chars) {
+    size_t ss = (size_t)TERM_SCROLLBACK_LINES * new_cols;
+    for (size_t i = 0; i < ss; i++) { /* Fill with blank spaces */
+      nsbc[i] = ' '; nsbf[i] = 7; nsbb[i] = 0;
+    }
+    /* Compact and copy old scrollback into the new width format */
+    for (int i = 0; i < t->sb_count; i++) {
+      int old_idx = (t->sb_head - t->sb_count + i);
+      while (old_idx < 0) old_idx += TERM_SCROLLBACK_LINES;
+      old_idx %= TERM_SCROLLBACK_LINES;
+      for (int c = 0; c < cc; c++) {
+        nsbc[i * new_cols + c] = t->sb_chars[old_idx * t->cols + c];
+        nsbf[i * new_cols + c] = t->sb_fg[old_idx * t->cols + c];
+        nsbb[i * new_cols + c] = t->sb_bg[old_idx * t->cols + c];
+      }
+    }
+    kfree(t->sb_chars); kfree(t->sb_fg); kfree(t->sb_bg);
+    t->sb_chars = nsbc;
+    t->sb_fg = nsbf;
+    t->sb_bg = nsbb;
+    t->sb_head = t->sb_count % TERM_SCROLLBACK_LINES;
+  }
+
+  /* 6. Handle growing/shrinking height */
   if (new_rows >= t->rows) {
     /* ==== GROWING: Pull history from scrollback to fill top space ==== */
     int pull = new_rows - t->rows;
