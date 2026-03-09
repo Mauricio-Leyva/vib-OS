@@ -541,6 +541,19 @@ void term_execute_command(struct terminal *term, const char *cmd) {
     }
     term->cursor_x = 0;
     term->cursor_y = 0;
+    term->scroll_offset = 0;
+    
+    /* Wipe scrollback history completely */
+    term->sb_count = 0;
+    term->sb_head = 0;
+    if (term->sb_chars) {
+      size_t sb_size = TERM_SCROLLBACK_LINES * term->cols;
+      for (size_t i = 0; i < sb_size; i++) {
+        term->sb_chars[i] = ' ';
+        term->sb_fg[i] = 7;
+        term->sb_bg[i] = 0;
+      }
+    }
   } else if (str_starts_with(cmd, "help")) {
     term_puts(term, "\033[1;36mVib-OS Terminal v2.0\033[0m\n");
     term_puts(term, "\033[33mFile Commands:\033[0m\n");
