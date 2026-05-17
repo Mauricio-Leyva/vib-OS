@@ -5,6 +5,7 @@
  * Uses virtio-tablet for absolute positioning (EV_ABS events).
  */
 
+#include "drivers/ps2.h"
 #include "printk.h"
 #include "types.h"
 
@@ -100,10 +101,7 @@ typedef struct __attribute__((packed)) {
 #define QUEUE_SIZE 16
 #define DESC_F_WRITE 2
 
-/* ===================================================================== */
-/* State */
-/* ===================================================================== */
-
+/* Mouse state */
 static volatile uint32_t *mouse_base = 0;
 static virtq_desc_t *desc = 0;
 static virtq_avail_t *avail = 0;
@@ -115,10 +113,10 @@ static uint16_t last_used_idx = 0;
 static uint8_t queue_mem[4096] __attribute__((aligned(4096)));
 static virtio_input_event_t event_bufs[QUEUE_SIZE] __attribute__((aligned(16)));
 
-/* Mouse state */
-static int mouse_x = 16384; /* Raw 0-32767 */
-static int mouse_y = 16384;
-static uint8_t mouse_buttons = 0;
+/* Virtio mouse state (internal) */
+static int virtio_mouse_x = 16384; /* Raw 0-32767 */
+static int virtio_mouse_y = 16384;
+static uint8_t virtio_mouse_buttons = 0;
 
 /* Keyboard state */
 static volatile uint32_t *kbd_base = 0;
@@ -185,7 +183,7 @@ static const char keycode_to_ascii_shifted[128] = {
     'T',  'Y', 'U',  'I', /* 16-23: uppercase letters */
     'O',  'P', '{',  '}',
     '\n', 0,   'A',  'S', /* 24-31: shift+[ = {, shift+] = } */
-    'D',  'F', 'G',  'H',
+    'D',  'F',  'G',  'H',
     'J',  'K', 'L',  ':', /* 32-39: shift+; = : */
     '"',  '~', 0,    '|',
     'Z',  'X', 'C',  'V', /* 40-47: shift+' = ", shift+` = ~, shift+\ = | */
@@ -305,22 +303,22 @@ void mouse_poll(void) {
     /* Process event */
     if (ev->type == EV_ABS) {
       if (ev->code == ABS_X) {
-        mouse_x = ev->value;
+        virtio_mouse_x = ev->value;
       } else if (ev->code == ABS_Y) {
-        mouse_y = ev->value;
+        virtio_mouse_y = ev->value;
       }
     } else if (ev->type == EV_KEY) {
       int pressed = (ev->value != 0);
       if (ev->code == BTN_LEFT) {
         if (pressed)
-          mouse_buttons |= 1;
+          virtio_mouse_buttons |= 1;
         else
-          mouse_buttons &= ~1;
+          virtio_mouse_buttons &= ~1;
       } else if (ev->code == BTN_RIGHT) {
         if (pressed)
-          mouse_buttons |= 2;
+          virtio_mouse_buttons |= 2;
         else
-          mouse_buttons &= ~2;
+          virtio_mouse_buttons &= ~2;
       }
     }
 
@@ -343,18 +341,29 @@ void mouse_poll(void) {
 /* ===================================================================== */
 
 void mouse_get_position(int *x, int *y) {
+#if defined(ARCH_X86_64)
+  extern volatile int mouse_x, mouse_y;
+  if (x) *x = mouse_x;
+  if (y) *y = mouse_y;
+#else
   mouse_poll();
 
   /* Scale from 0-32767 to screen dimensions */
   if (x)
-    *x = (mouse_x * SCREEN_WIDTH) / 32768;
+    *x = (virtio_mouse_x * SCREEN_WIDTH) / 32768;
   if (y)
-    *y = (mouse_y * SCREEN_HEIGHT) / 32768;
+    *y = (virtio_mouse_y * SCREEN_HEIGHT) / 32768;
+#endif
 }
 
 int mouse_get_buttons(void) {
-  mouse_poll();
+#if defined(ARCH_X86_64)
+  extern volatile int mouse_buttons;
   return mouse_buttons;
+#else
+  mouse_poll();
+  return virtio_mouse_buttons;
+#endif
 }
 
 /* ===================================================================== */
@@ -712,14 +721,28 @@ static int keyboard_init(void) {
 
 int input_init(void) {
   printk(KERN_INFO "INPUT: Initializing input system\n");
+#if !defined(ARCH_X86_64)
   mouse_init();
   keyboard_init();
+#else
+  printk(KERN_INFO "INPUT: Initializing PS/2 input for x86_64\n");
+  ps2_init();
+  /* Use the real framebuffer dimensions so the cursor can't drift off-screen */
+  extern void fb_get_info(uint32_t **buffer, uint32_t *width, uint32_t *height);
+  uint32_t *fb_buf = 0;
+  uint32_t fb_w = 1024, fb_h = 768;
+  fb_get_info(&fb_buf, &fb_w, &fb_h);
+  ps2_set_screen_bounds((int)fb_w, (int)fb_h);
+#endif
   printk(KERN_INFO "INPUT: Ready\n");
   return 0;
 }
 
 void input_set_key_callback(void (*callback)(int key)) {
   key_callback = callback;
+#if defined(ARCH_X86_64)
+  ps2_set_keyboard_callback(callback);
+#endif
 }
 
 void input_set_gui_key_callback(void (*callback)(int key)) {
@@ -727,6 +750,17 @@ void input_set_gui_key_callback(void (*callback)(int key)) {
 }
 
 void input_poll(void) {
+#if defined(ARCH_X86_64)
+  /* Poll PS/2 */
+  ps2_poll();
+  
+  /* Update shared mouse state for the GUI/Compositor */
+  extern volatile int mouse_x, mouse_y, mouse_buttons;
+  mouse_x = ps2_mouse_x;
+  mouse_y = ps2_mouse_y;
+  mouse_buttons = ps2_mouse_buttons;
+#endif
+
   /* Poll UART for keyboard input */
   extern int uart_getc_nonblock(void);
   int c = uart_getc_nonblock();

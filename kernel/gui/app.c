@@ -70,6 +70,9 @@ static int terminal_init(struct application *app) {
 
   struct terminal *term = term_create(102 + 2, 100 + 30, 80, 24);
   app->app_data = term;
+  
+  extern void gui_set_window_userdata(struct window *win, void *data);
+  gui_set_window_userdata(app->main_window, term);
 
   /* Set as active terminal so keyboard input works */
   extern void term_set_active(struct terminal * term);

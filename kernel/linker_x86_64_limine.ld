@@ -20,28 +20,37 @@ SECTIONS {
     . = KERNEL_VIRT;
     __kernel_start = .;
 
-    /* Limine requests section - must be first for bootloader scanning */
-    .limine_requests ALIGN(4K) : AT(ADDR(.limine_requests) - KERNEL_VIRT + KERNEL_PHYS) {
+    .limine_requests : AT(KERNEL_PHYS) {
         KEEP(*(.limine_requests))
     } :limine
 
-    /* Code section */
-    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VIRT + KERNEL_PHYS) {
+    . = ALIGN(4K);
+
+    .text : AT(KERNEL_PHYS + (. - KERNEL_VIRT)) {
+        __text_start = .;
         *(.text .text.*)
+        __text_end = .;
     } :text
 
-    /* Read-only data */
-    .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VIRT + KERNEL_PHYS) {
+    . = ALIGN(4K);
+
+    .rodata : AT(KERNEL_PHYS + (. - KERNEL_VIRT)) {
+        __rodata_start = .;
         *(.rodata .rodata.*)
+        __rodata_end = .;
     } :rodata
 
-    /* Data section */
-    .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VIRT + KERNEL_PHYS) {
+    . = ALIGN(4K);
+
+    .data : AT(KERNEL_PHYS + (. - KERNEL_VIRT)) {
+        __data_start = .;
         *(.data .data.*)
+        __data_end = .;
     } :data
 
-    /* BSS section (uninitialized data) */
-    .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_VIRT + KERNEL_PHYS) {
+    . = ALIGN(4K);
+
+    .bss : AT(KERNEL_PHYS + (. - KERNEL_VIRT)) {
         __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)

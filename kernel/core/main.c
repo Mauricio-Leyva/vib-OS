@@ -45,6 +45,9 @@ void kernel_main(void *dtb) {
   /* Initialize early console for debugging */
   uart_early_init();
 
+  /* Architecture-specific early init (IDT, disable PIC, etc.) */
+  arch_early_init();
+
   /* Print boot banner */
   print_banner();
 
@@ -198,8 +201,10 @@ static void init_subsystems(void *dtb) {
   vfs_mkdir("/Desktop/Projects", 0755);
   ramfs_create_file("readme.txt", 0644,
                     "Welcome to Vib-OS!\nThis is a real file in RamFS.");
+  printk(KERN_INFO "  DEBUG: readme.txt created, creating todo.txt...\n");
   ramfs_create_file("todo.txt", 0644,
                     "- Implement Browser\n- Fix Bugs\n- Sleep");
+  printk(KERN_INFO "  DEBUG: todo.txt created, creating sample.mp3...\n");
   ramfs_create_file_bytes("sample.mp3", 0644, vib_seed_mp3, vib_seed_mp3_len);
 
   /* Add baseline JPEG images to Pictures directory */
@@ -345,12 +350,13 @@ static void init_subsystems(void *dtb) {
 
     /* Create demo windows with working terminal */
     extern struct window *gui_create_file_manager(int x, int y);
-    gui_create_window("Terminal", 30, 40, 660, 420);
+    struct window *main_term_win = gui_create_window("Terminal", 30, 40, 660, 420);
 
     /* Create and set active terminal so keyboard input works */
     {
       extern struct terminal *term_create(int x, int y, int cols, int rows);
       extern void term_set_active(struct terminal * term);
+      extern void gui_set_window_userdata(struct window *win, void *data);
       /* Calculate cols/rows from window size:
        * Content area = window - titlebar(28) - 2*border(2) - 2*padding(4) */
       int term_px_w = 660 - 2 * 2;     /* minus borders */
@@ -359,14 +365,24 @@ static void init_subsystems(void *dtb) {
       int term_rows = (term_px_h - 2 * 4) / 16; /* 16px per char */
       struct terminal *term = term_create(32, 70, term_cols, term_rows);
       if (term) {
+        if (main_term_win) gui_set_window_userdata(main_term_win, term);
         term_set_active(term);
       }
     }
 
     gui_create_file_manager(200, 100);
 
+    /* Focus the Terminal so the user can start typing without having to
+     * click first. gui_focus_window also raises it to the top of the stack. */
+    extern void gui_focus_window(struct window *win);
+    if (main_term_win) {
+      gui_focus_window(main_term_win);
+    }
+
     /* Compose and display desktop */
+    printk(KERN_INFO "  DEBUG: About to gui_compose...\n");
     gui_compose();
+    printk(KERN_INFO "  DEBUG: gui_compose done, drawing cursor...\n");
     gui_draw_cursor();
 
     printk(KERN_INFO "  GUI desktop ready!\n");
@@ -375,12 +391,17 @@ static void init_subsystems(void *dtb) {
   /* Initialize PCI bus and detect devices (including Audio) */
   printk(KERN_INFO "  Initializing PCI bus...\n");
   extern void pci_init(void);
+#if defined(ARCH_X86_64)
+  printk(KERN_INFO "  PCI: Skipping ECAM scan on x86_64 (uses different base)\n");
+#else
   pci_init();
+#endif
 
   /* Initialize GPU driver (virtio-gpu for QEMU acceleration) */
   printk(KERN_INFO "  Initializing GPU driver...\n");
   extern int virtio_gpu_init(pci_device_t * pci);
   extern pci_device_t *pci_find_device(uint16_t vendor, uint16_t device);
+#if !defined(ARCH_X86_64)
   pci_device_t *gpu = pci_find_device(0x1AF4, 0x1050); /* virtio-gpu */
   if (gpu) {
     if (virtio_gpu_init(gpu) == 0) {
@@ -391,6 +412,9 @@ static void init_subsystems(void *dtb) {
   } else {
     printk(KERN_INFO "  GPU: No virtio-gpu found (software rendering)\n");
   }
+#else
+  printk(KERN_INFO "  GPU: Using Limine framebuffer (no virtio-gpu)\n");
+#endif
 
   printk(KERN_INFO "  Loading keyboard driver...\n");
   printk(KERN_INFO "  Loading NVMe driver...\n");
@@ -399,7 +423,11 @@ static void init_subsystems(void *dtb) {
   extern void tcpip_init(void);
   extern int virtio_net_init(void);
   tcpip_init();
+#if !defined(ARCH_X86_64)
   virtio_net_init();
+#else
+  printk(KERN_INFO "  NET: Skipping virtio-net on x86_64\n");
+#endif
 
   /* ================================================================= */
   /* Phase 6: Enable Interrupts */
@@ -425,7 +453,12 @@ static volatile int g_key_pressed = 0;
 /* Keyboard callback wrapper - called from virtio keyboard driver */
 static void keyboard_handler(int key) {
   extern void kapi_sys_key_event(int key);
+  extern void gui_handle_key_event(int key);
   kapi_sys_key_event(key);
+  /* On ARM64 virtio_input calls gui_key_callback separately, but the PS/2
+   * driver on x86 only invokes this single callback. Forward the key so the
+   * focused window (terminal, notepad, etc.) actually receives it. */
+  gui_handle_key_event(key);
 
   /* Signal the event loop that a key was pressed (triggers redraw) */
   g_key_pressed = 1;
@@ -491,11 +524,7 @@ static void start_init_process(void) {
       needs_redraw = 1;
     }
 
-    /* Poll input system again (Keyboard & Mouse) */
-    extern void input_poll(void);
-    input_poll();
-
-    /* Get mouse state (updated by input_poll) */
+    /* Get mouse state (updated by input_poll above) */
     extern void mouse_get_position(int *x, int *y);
     extern int mouse_get_buttons(void);
     extern void gui_handle_mouse_event(int x, int y, int buttons);
@@ -517,11 +546,27 @@ static void start_init_process(void) {
       last_buttons = mbuttons;
     }
 
-    /* Periodic refresh for animations (5 FPS) */
+    /* Periodic refresh. Prefer PIT-based ms timer when available; fall back
+     * to an rdtsc-based timer so we hit a stable ~60 FPS under KVM where
+     * a frame counter would compose tens of thousands of times per second
+     * and starve actual work. */
     uint64_t now = arch_timer_get_ms();
-    if (now - last_refresh >= REFRESH_MS) {
-      last_refresh = now;
-      needs_redraw = 1;
+    if (now != last_refresh) {
+      if (now - last_refresh >= REFRESH_MS) {
+        last_refresh = now;
+        needs_redraw = 1;
+      }
+    } else {
+      static uint64_t last_tsc = 0;
+      uint32_t lo, hi;
+      __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+      uint64_t tsc = ((uint64_t)hi << 32) | lo;
+      /* ~16ms at 2GHz ≈ 32M cycles; close enough for ~60 FPS without
+       * needing to actually calibrate the TSC. */
+      if (tsc - last_tsc >= 32000000ULL) {
+        last_tsc = tsc;
+        needs_redraw = 1;
+      }
     }
 
     /* Redraw when needed - compose includes cursor drawing */
@@ -532,7 +577,12 @@ static void start_init_process(void) {
     }
 
     frame++;
-    (void)frame;
+    /* Heartbeat on serial so we can see the loop is alive even when nothing
+     * on screen is changing. ~once per second at the current iteration rate. */
+    if ((frame & 0xFFFFF) == 0) {
+      printk(KERN_INFO "LOOP: frame=%u mouse=(%d,%d) btn=%d\n",
+             (unsigned)frame, last_mx, last_my, last_buttons);
+    }
 
     /* Check if we should yield to let userspace run */
     /* If no input events processed, yield CPU */

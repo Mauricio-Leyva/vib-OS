@@ -407,8 +407,7 @@ static long sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     return -ENOSYS;
   }
 
-/* Align len to page size */
-#define PAGE_SIZE 4096UL
+  /* Align len to page size */
   len = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
   /* Check bounds */
@@ -762,7 +761,7 @@ void handle_sync_exception(struct pt_regs *regs) {
   case 0x20: /* Instruction abort from lower EL */
   case 0x21: /* Instruction abort from same EL */
     printk(KERN_EMERG "Instruction abort at PC=0x%llx\n",
-           (unsigned long long)arch_context_get_pc(regs));
+           (unsigned long long)regs->pc);
     panic("Instruction abort");
     break;
 
@@ -773,13 +772,13 @@ void handle_sync_exception(struct pt_regs *regs) {
     uint64_t far;
     asm volatile("mrs %0, far_el1" : "=r"(far));
     printk(KERN_EMERG "Data abort at PC=0x%llx, FAR=0x%llx\n",
-           (unsigned long long)arch_context_get_pc(regs),
+           (unsigned long long)regs->pc,
            (unsigned long long)far);
 #elif defined(ARCH_X86_64) || defined(ARCH_X86)
     uint64_t cr2;
     asm volatile("mov %%cr2, %0" : "=r"(cr2));
     printk(KERN_EMERG "Page fault at PC=0x%llx, CR2=0x%llx\n",
-           (unsigned long long)arch_context_get_pc(regs),
+           (unsigned long long)regs->pc,
            (unsigned long long)cr2);
 #endif
     panic("Data abort");
@@ -787,14 +786,14 @@ void handle_sync_exception(struct pt_regs *regs) {
 
   case 0x00: /* Unknown reason */
     printk(KERN_EMERG "Unknown exception at PC=0x%llx\n",
-           (unsigned long long)arch_context_get_pc(regs));
+           (unsigned long long)regs->pc);
     panic("Unknown exception");
     break;
 
   default:
     printk(KERN_EMERG "Unhandled exception class 0x%x, ISS=0x%x\n", ec, iss);
     printk(KERN_EMERG "PC=0x%llx\n",
-           (unsigned long long)arch_context_get_pc(regs));
+           (unsigned long long)regs->pc);
     panic("Unhandled exception");
     break;
   }

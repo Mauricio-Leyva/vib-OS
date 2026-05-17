@@ -11,7 +11,7 @@
 
 .code64
 .section .text.boot
-.global _start
+.global _start_old
 .extern kernel_main
 .extern __bss_start
 .extern __bss_end
@@ -28,7 +28,7 @@
  * - Paging enabled with identity mapping
  * - Interrupts disabled
  */
-_start:
+_start_old:
     /* ================================================================= */
     /* Disable interrupts during initialization */
     /* ================================================================= */
@@ -124,16 +124,21 @@ gdt64_pointer:
     .quad   gdt64                   # Base
 
 /* ===================================================================== */
-/* Interrupt Descriptor Table (IDT) - Placeholder */
+/* Interrupt Descriptor Table (IDT) - in writable .data section */
 /* ===================================================================== */
+.section .data
 .align 16
+.global idt64
 idt64:
-    .fill   256, 16, 0              # 256 entries, 16 bytes each
+    .zero   4096                    # 256 entries, 16 bytes each
 idt64_end:
 
 idt64_pointer:
     .word   idt64_end - idt64 - 1   # Limit
     .quad   idt64                   # Base
+
+/* Switch back to .text for ISR code */
+.section .text
 
 /* ===================================================================== */
 /* Exception/Interrupt Handlers */
@@ -247,3 +252,21 @@ isr_common:
     
     /* Return from interrupt */
     iretq
+
+/* Dummy ISR for unmapped entries */
+.global isr_dummy
+isr_dummy:
+    push $0
+    push $255
+    jmp isr_common
+
+/* Array of ISR pointers to help initialize the IDT in C */
+.global isr_stub_table
+isr_stub_table:
+.irp num,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+    .quad isr\num
+.endr
+.fill 128 - 48, 8, 0 # gap
+.global isr128_ptr
+isr128_ptr:
+    .quad isr128

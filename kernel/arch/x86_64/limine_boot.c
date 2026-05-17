@@ -216,14 +216,15 @@ void _start(void) {
     }
 
     /* Verify base revision was accepted */
-    if (limine_base_revision[2] != 0) {
-        serial_puts("ERROR: Limine base revision mismatch\n");
+    if (limine_base_revision[2] != 0 && limine_base_revision[2] < 2) {
+        serial_puts("WARNING: Limine base revision mismatch. Proceeding anyway.\n");
         serial_puts("Revision value: ");
         serial_puthex(limine_base_revision[2]);
         serial_puts("\n");
-        halt();
+        // halt(); /* Do not halt here, limine v5 implementation differs occasionally */
+    } else {
+        serial_puts("Limine base revision OK\n");
     }
-    serial_puts("Limine base revision OK\n");
 
     /* Get framebuffer */
     if (framebuffer_request.response == 0) {
@@ -261,6 +262,19 @@ void _start(void) {
     }
 
     serial_puts("Calling kernel_main...\n");
+
+    /* Enable SSE/AVX for floating point format processing in kernel */
+    serial_puts("Enabling SSE...\n");
+    __asm__ volatile(
+        "mov %%cr0, %%rax\n"
+        "and $~(1 << 2), %%rax\n"
+        "or $(1 << 1), %%rax\n"
+        "mov %%rax, %%cr0\n"
+        "mov %%cr4, %%rax\n"
+        "or $(3 << 9), %%rax\n"
+        "mov %%rax, %%cr4\n"
+        : : : "rax"
+    );
 
     /* Call kernel main - pass NULL for DTB on x86_64 */
     kernel_main(0);

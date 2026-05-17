@@ -12,7 +12,8 @@
 /* Local APIC Registers */
 /* ===================================================================== */
 
-#define LAPIC_BASE      0xFEE00000
+#define HHDM_OFFSET     0xFFFF800000000000ULL
+#define LAPIC_BASE      (0xFEE00000 + HHDM_OFFSET)
 
 #define LAPIC_ID        0x020
 #define LAPIC_VER       0x030
@@ -51,7 +52,7 @@
 /* I/O APIC Registers */
 /* ===================================================================== */
 
-#define IOAPIC_BASE     0xFEC00000
+#define IOAPIC_BASE     (0xFEC00000 + HHDM_OFFSET)
 
 #define IOAPIC_REG_ID       0x00
 #define IOAPIC_REG_VER      0x01
@@ -106,9 +107,11 @@ void apic_init(void)
     lapic_write(LAPIC_TPR, 0);
     
     /* Set up timer (periodic mode, IRQ 32) */
-    lapic_write(LAPIC_TDCR, 0x03);  /* Divide by 16 */
+    /*
+    lapic_write(LAPIC_TDCR, 0x03);  // Divide by 16 
     lapic_write(LAPIC_TIMER, LAPIC_TIMER_PERIODIC | 32);
-    lapic_write(LAPIC_TICR, 10000000);  /* Initial count */
+    lapic_write(LAPIC_TICR, 10000000);  // Initial count 
+    */
     
     /* Mask all other LVT entries */
     lapic_write(LAPIC_LINT0, LAPIC_TIMER_MASKED);

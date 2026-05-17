@@ -19,9 +19,14 @@
 #define MAX_ALLOC                                                              \
   (32 * 1024 * 1024) /* Maximum single allocation (32MB for large images) */
 
-/* Fixed heap location - after kernel at 0x42000000 */
-/* Kernel loads at 0x40200000, so 0x42000000 gives 30MB for kernel code/data */
+/* Fixed heap location - after kernel */
+/* On ARM64: kernel loads at 0x40200000, so 0x42000000 gives 30MB for kernel code/data */
+/* On x86_64 with Limine HHDM: need to use virtual address via HHDM offset */
+#if defined(ARCH_X86_64)
+#define HEAP_BASE (0xFFFF800000000000UL + 0x2000000UL) /* HHDM + 32MB offset */
+#else
 #define HEAP_BASE 0x42000000
+#endif
 
 /* Block header */
 struct block_header {

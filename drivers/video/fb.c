@@ -188,7 +188,28 @@ int fb_init(void)
 {
     printk(KERN_INFO "FB: Initializing framebuffer\n");
     
-    /* Use static buffer in BSS */
+#if defined(ARCH_X86_64)
+    /* On x86_64 with Limine, use the bootloader-provided framebuffer */
+    extern int limine_get_framebuffer(uint32_t **buffer, uint32_t *width,
+                                       uint32_t *height, uint32_t *pitch);
+    uint32_t *fb_buf = 0;
+    uint32_t fb_w = 0, fb_h = 0, fb_p = 0;
+    
+    if (limine_get_framebuffer(&fb_buf, &fb_w, &fb_h, &fb_p) == 0 && fb_buf) {
+        framebuffer.buffer = fb_buf;
+        framebuffer.width = fb_w;
+        framebuffer.height = fb_h;
+        framebuffer.pitch = fb_p;
+        framebuffer.initialized = true;
+        
+        printk(KERN_INFO "FB: Limine framebuffer %ux%u at 0x%lx (pitch=%u)\n",
+               fb_w, fb_h, (unsigned long)fb_buf, fb_p);
+    } else {
+        printk(KERN_ERR "FB: No Limine framebuffer available!\n");
+        return -1;
+    }
+#else
+    /* ARM64: Use static buffer + QEMU ramfb */
     static uint32_t static_framebuffer[1024 * 768] __attribute__((aligned(4096)));
     
     framebuffer.buffer = static_framebuffer;
@@ -210,6 +231,7 @@ int fb_init(void)
     } else {
         printk(KERN_WARNING "FB: ramfb not available, display may not work\n");
     }
+#endif
     
     /* Show boot splash */
     fb_show_splash();

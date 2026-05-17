@@ -197,9 +197,8 @@ int vmm_init(void)
     
     printk("VMM: Memory attributes configured\n");
     
-    /* Create identity mapping for first 1GB (covers kernel and devices) */
-    /* Using 1GB block mappings at level 1 for efficiency */
-    
+#ifdef ARCH_ARM64
+    /* ARM64 specific mapping */
     /* Map 0x00000000-0x3FFFFFFF (first 1GB - RAM) as normal memory */
     int idx0 = pte_index(0x00000000UL, 0);
     uint64_t *l1_table = alloc_page_table();
@@ -218,62 +217,83 @@ int vmm_init(void)
                   PTE_VALID | PTE_BLOCK | PTE_ATTR_NORMAL | PTE_SH_INNER | PTE_ACCESSED;
     
     /* Map High PCI ECAM region (0x40_0000_0000) for 1GB (covers 0x40_1000_0000) */
-    /* L1 index 256 (256GB) maps 0x40_0000_0000 - 0x40_3FFF_FFFF */
-    /* Map as DEVICE memory (nGnRnE) */
     l1_table[256] = (0x4000000000ULL & PTE_ADDR_MASK) | 
                     PTE_VALID | PTE_BLOCK | PTE_ATTR_DEVICE | PTE_SH_NONE | PTE_ACCESSED;
     
     printk("VMM: RAM identity mapped (0-2GB) + High PCI ECAM (256GB base)\n");
     
-    /* Map device region 0x08000000-0x10000000 for GIC, UART etc */
-    /* This is at L1 index 0, but we need L2 tables for finer control */
-    /* For simplicity, use block mappings - device memory is in first 1GB */
-    
-    /* Load page tables - architecture specific */
-#ifdef ARCH_ARM64
     /* Load TTBR0 (identity mapping for kernel boot) */
     asm volatile("msr ttbr0_el1, %0" : : "r" ((uint64_t)kernel_pgd));
     
     /* Load TTBR1 (will be used for high-half kernel later) */
     asm volatile("msr ttbr1_el1, %0" : : "r" ((uint64_t)kernel_pgd));
-#elif defined(ARCH_X86_64)
-    /* Load CR3 with page table address */
-    asm volatile("mov %0, %%cr3" :: "r"((uint64_t)kernel_pgd) : "memory");
-#elif defined(ARCH_X86)
-    /* Load CR3 with page directory address */
-    asm volatile("mov %0, %%cr3" :: "r"((uint32_t)kernel_pgd) : "memory");
-#endif
     
     /* Ensure all writes complete before enabling MMU */
-#ifdef ARCH_ARM64
     asm volatile("dsb sy");
     asm volatile("isb");
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
-    asm volatile("" ::: "memory");  /* Compiler barrier */
-#endif
     
     printk("VMM: TTBRs configured, about to enable MMU...\n");
     
-    /* Enable MMU - architecture specific */
-#ifdef ARCH_ARM64
+    /* Enable MMU */
     uint64_t sctlr;
     asm volatile("mrs %0, sctlr_el1" : "=r" (sctlr));
     sctlr |= (1 << 0);   /* M: Enable MMU */
     sctlr |= (1 << 2);   /* C: Enable data cache */
     sctlr |= (1 << 12);  /* I: Enable instruction cache */
     asm volatile("msr sctlr_el1, %0" : : "r" (sctlr));
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
-    /* x86: MMU already enabled by bootloader, just reload CR3 */
-    /* CR3 was already loaded above */
-#endif
-    
-#ifdef ARCH_ARM64
     asm volatile("isb");
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
-    /* No ISB equivalent needed on x86 */
-#endif
     
     printk(KERN_INFO "VMM: MMU enabled! Page tables active.\n");
+#elif defined(ARCH_X86_64)
+    /* x86_64 Limine Bootloader specific */
+    /* Copy Limine's PML4 into our kernel_pgd */
+    uint64_t cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t *current_pml4 = (uint64_t *)(cr3 + PHYS_OFFSET);
+    
+    for (int i = 0; i < VMM_ENTRIES; i++) {
+        kernel_pgd[i] = current_pml4[i];
+    }
+    
+    /* Find physical address of kernel_pgd by scanning the active Limine tables */
+    virt_addr_t vaddr = (virt_addr_t)kernel_pgd;
+    phys_addr_t pgd_phys = 0;
+    
+    uint64_t pml4e = current_pml4[(vaddr >> 39) & 0x1ff];
+    if (pml4e & 1) {
+        uint64_t *pdpt = (uint64_t *)((pml4e & PTE_ADDR_MASK) + PHYS_OFFSET);
+        uint64_t pdpte = pdpt[(vaddr >> 30) & 0x1ff];
+        if (pdpte & 1) {
+            if (pdpte & 0x80) { /* 1GB page */
+                pgd_phys = (pdpte & PTE_ADDR_MASK) | (vaddr & 0x3FFFFFFF);
+            } else {
+                uint64_t *pd = (uint64_t *)((pdpte & PTE_ADDR_MASK) + PHYS_OFFSET);
+                uint64_t pde = pd[(vaddr >> 21) & 0x1ff];
+                if (pde & 1) {
+                    if (pde & 0x80) { /* 2MB page */
+                        pgd_phys = (pde & PTE_ADDR_MASK) | (vaddr & 0x1FFFFF);
+                    } else {
+                        uint64_t *pt = (uint64_t *)((pde & PTE_ADDR_MASK) + PHYS_OFFSET);
+                        uint64_t pte = pt[(vaddr >> 12) & 0x1ff];
+                        if (pte & 1) {
+                            pgd_phys = (pte & PTE_ADDR_MASK) | (vaddr & 0xFFF);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if (!pgd_phys) {
+        printk(KERN_ERR "VMM: Could not resolve physical address of kernel_pgd!\n");
+        return -1;
+    }
+    
+    /* Load CR3 with our own PML4 copy so we own the root page table */
+    asm volatile("mov %0, %%cr3" :: "r"(pgd_phys) : "memory");
+    
+    printk(KERN_INFO "VMM: Copied Limine PML4 and took over CR3.\n");
+#endif
     
     return 0;
 }

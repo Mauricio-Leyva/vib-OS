@@ -33,7 +33,7 @@ ifeq ($(ARCH),arm64)
     QEMU := qemu-system-aarch64
     QEMU_MACHINE := virt,gic-version=3
     QEMU_CPU := max
-    LINKER_SCRIPT := $(KERNEL_DIR)/linker.ld
+    VIBOS_LINKER_SCRIPT := $(KERNEL_DIR)/linker.ld
     KERNEL_ENTRY := _start
 else ifeq ($(ARCH),x86_64)
     CROSS_TARGET := --target=x86_64-unknown-none-elf
@@ -41,7 +41,7 @@ else ifeq ($(ARCH),x86_64)
     QEMU := qemu-system-x86_64
     QEMU_MACHINE := q35
     QEMU_CPU := qemu64
-    LINKER_SCRIPT := $(KERNEL_DIR)/linker_x86_64.ld
+    VIBOS_LINKER_SCRIPT := $(KERNEL_DIR)/linker_x86_64_limine.ld
     KERNEL_ENTRY := _start
 else ifeq ($(ARCH),x86)
     CROSS_TARGET := --target=i686-unknown-none-elf
@@ -49,7 +49,7 @@ else ifeq ($(ARCH),x86)
     QEMU := qemu-system-i386
     QEMU_MACHINE := pc
     QEMU_CPU := pentium3
-    LINKER_SCRIPT := $(KERNEL_DIR)/linker_x86.ld
+    VIBOS_LINKER_SCRIPT := $(KERNEL_DIR)/linker_x86.ld
     KERNEL_ENTRY := _start
 else
     $(error Unsupported architecture: $(ARCH). Use arm64, x86_64, or x86)
@@ -95,7 +95,7 @@ CFLAGS_KERNEL := $(CFLAGS_COMMON) $(CROSS_TARGET) $(ARCH_CFLAGS) \
 
 ASFLAGS := $(CROSS_TARGET) $(ARCH_CFLAGS) -I$(KERNEL_DIR)/include
 
-LDFLAGS_KERNEL := -nostdlib -static -T $(LINKER_SCRIPT) -e $(KERNEL_ENTRY)
+LDFLAGS_KERNEL = -nostdlib -static -T $(VIBOS_LINKER_SCRIPT) -e $(KERNEL_ENTRY) -z max-page-size=0x1000 --image-base=0xFFFFFFFF80000000
 
 # ============================================================================
 # QEMU Configuration
@@ -152,14 +152,13 @@ KERNEL_BINARY := $(BUILD_DIR)/kernel/vibos-$(ARCH).elf
 # Main Targets
 # ============================================================================
 
-.PHONY: all clean kernel image qemu qemu-debug help
+.PHONY: all clean kernel image qemu qemu-debug help limine-tools
 
 all: kernel image
-	@echo "=========================================="
-	@echo "Vib-OS $(ARCH) build complete!"
-	@echo "=========================================="
-	@echo "Kernel: $(KERNEL_BINARY)"
-	@echo "Run 'make qemu' to test in emulator"
+
+limine-tools:
+	@chmod +x scripts/download-limine.sh
+	@./scripts/download-limine.sh
 
 help:
 	@echo "Vib-OS Multi-Architecture Build System"
@@ -241,7 +240,7 @@ $(BUILD_DIR)/drivers/%.o: $(DRIVERS_DIR)/%.c
 
 $(KERNEL_BINARY): $(ALL_OBJECTS)
 	@echo "[LD] $@"
-	@$(LD) $(LDFLAGS_KERNEL) -o $@ $^
+	$(LD) $(LDFLAGS_KERNEL) -o $@ $^
 	@if command -v $(OBJDUMP) >/dev/null 2>&1; then \
 		$(OBJDUMP) -h $@ > $(BUILD_DIR)/kernel/sections.txt; \
 		echo "[INFO] Kernel sections written to $(BUILD_DIR)/kernel/sections.txt"; \
@@ -259,11 +258,16 @@ image: kernel
 ifeq ($(ARCH),arm64)
 	@./scripts/create-boot-image.sh $(BUILD_DIR) $(IMAGE_DIR)
 else ifeq ($(ARCH),x86_64)
-	@./scripts/create-uefi-image.sh $(BUILD_DIR) $(IMAGE_DIR)
+	@chmod +x scripts/create-limine-iso.sh
+	@./scripts/create-limine-iso.sh $(BUILD_DIR) $(IMAGE_DIR)
 else ifeq ($(ARCH),x86)
 	@./scripts/create-bios-image.sh $(BUILD_DIR) $(IMAGE_DIR)
 endif
-	@echo "[IMAGE] Created: $(IMAGE_DIR)/vibos-$(ARCH).img"
+	@if [ "$(ARCH)" = "x86_64" ]; then \
+		echo "[IMAGE] Created: $(IMAGE_DIR)/vibos-$(ARCH).iso"; \
+	else \
+		echo "[IMAGE] Created: $(IMAGE_DIR)/vibos-$(ARCH).img"; \
+	fi
 
 # ============================================================================
 # QEMU Testing
@@ -274,7 +278,7 @@ qemu: image
 ifeq ($(ARCH),arm64)
 	@$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BINARY)
 else ifeq ($(ARCH),x86_64)
-	@$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BINARY)
+	@$(QEMU) -M q35,usb=off -cpu qemu64 -m 1G -cdrom $(IMAGE_DIR)/vibos-$(ARCH).iso -serial stdio -vga std
 else ifeq ($(ARCH),x86)
 	@$(QEMU) $(QEMU_FLAGS) -drive format=raw,file=$(IMAGE_DIR)/vibos-$(ARCH).img
 endif

@@ -10,11 +10,75 @@
 /* Early Initialization */
 /* ===================================================================== */
 
+struct idt_entry {
+    uint16_t offset_low;
+    uint16_t cs;
+    uint8_t ist;
+    uint8_t attributes;
+    uint16_t offset_mid;
+    uint32_t offset_high;
+    uint32_t zero;
+} __attribute__((packed));
+
+extern struct idt_entry idt64[256];
+extern void* isr_stub_table[];
+extern void isr_dummy(void);
+extern void isr128_ptr(void);
+
+static void idt_set_gate(uint8_t num, uint64_t base, uint16_t sel, uint8_t flags)
+{
+    idt64[num].offset_low = base & 0xFFFF;
+    idt64[num].cs = sel;
+    idt64[num].ist = 0;
+    idt64[num].attributes = flags;
+    idt64[num].offset_mid = (base >> 16) & 0xFFFF;
+    idt64[num].offset_high = (base >> 32) & 0xFFFFFFFF;
+    idt64[num].zero = 0;
+}
+
+static void idt_init(void)
+{
+    /* Use the kernel CS currently in use. Limine v5+ enters the kernel with
+     * CS=0x28 (its 64-bit code segment), and 0x08 in that GDT is a 16-bit
+     * code segment — loading 0x08 on interrupt entry triggers #GP → triple
+     * fault on every IRQ. Reading CS at runtime keeps us correct regardless
+     * of the bootloader's GDT layout. */
+    uint16_t kernel_cs;
+    asm volatile("mov %%cs, %0" : "=r"(kernel_cs));
+
+    /* Initialize all IDT entries to point to the dummy ISR */
+    for (int i = 0; i < 256; i++) {
+        idt_set_gate(i, (uint64_t)isr_dummy, kernel_cs, 0x8E);
+    }
+
+    /* Install all stubs from boot.S */
+    for (int i = 0; i <= 47; i++) {
+        idt_set_gate(i, (uint64_t)isr_stub_table[i], kernel_cs, 0x8E);
+    }
+
+    /* Handlers that allow userspace (Ring 3) invocation need DPL=3 */
+    idt_set_gate(128, *(uint64_t*)&isr128_ptr, kernel_cs, 0xEE);
+
+    /* Load the IDT into the CPU */
+    struct {
+        uint16_t limit;
+        uint64_t base;
+    } __attribute__((packed)) idt_ptr = {
+        .limit = sizeof(struct idt_entry) * 256 - 1,
+        .base = (uint64_t)idt64
+    };
+    asm volatile("lidt %0" : : "m"(idt_ptr));
+
+    printk(KERN_INFO "x86_64: IDT initialized and loaded (CS=0x%x)\n", kernel_cs);
+}
+
 void arch_early_init(void)
 {
     /* Disable PIC (we'll use APIC) */
     outb(0x21, 0xFF);
     outb(0xA1, 0xFF);
+    
+    idt_init();
     
     printk(KERN_INFO "x86_64: Early initialization complete\n");
 }
@@ -55,6 +119,17 @@ void arch_irq_init(void)
     /* Initialize APIC/PIC - implemented in separate driver */
     extern void apic_init(void);
     apic_init();
+
+    /* Route legacy IRQs through IOAPIC.
+     * On standard PC/q35 ACPI, ISA IRQ 0 (PIT) is overridden to GSI 2 by
+     * the MADT Interrupt Source Override entry. We don't parse MADT yet, so
+     * route both GSI 0 and GSI 2 to vector 32 — the unused one is harmless. */
+    extern void ioapic_set_irq(uint8_t irq, uint8_t vector, bool enable);
+
+    ioapic_set_irq(0, 32, true);   /* PIT (legacy GSI) */
+    ioapic_set_irq(2, 32, true);   /* PIT (typical MADT override) */
+    ioapic_set_irq(1, 33, true);   /* PS/2 Keyboard */
+    ioapic_set_irq(12, 44, true);  /* PS/2 Mouse */
 }
 
 /* ===================================================================== */
@@ -374,17 +449,79 @@ typedef struct {
     uint64_t rip, cs, rflags, rsp, ss;
 } interrupt_frame_t;
 
+
+/* Serial output helpers for exception handler (avoid printk/variadic) */
+static void exc_serial_putc(char c) {
+    while ((inb(0x3F8 + 5) & 0x20) == 0);
+    outb(0x3F8, c);
+    if (c == '\n') {
+        while ((inb(0x3F8 + 5) & 0x20) == 0);
+        outb(0x3F8, '\r');
+    }
+}
+
+static void exc_serial_puts(const char *s) {
+    while (*s) exc_serial_putc(*s++);
+}
+
+static void exc_serial_puthex(uint64_t val) {
+    const char *hex = "0123456789ABCDEF";
+    exc_serial_puts("0x");
+    for (int i = 60; i >= 0; i -= 4)
+        exc_serial_putc(hex[(val >> i) & 0xF]);
+}
+
 void handle_exception(interrupt_frame_t *frame)
 {
-    printk(KERN_ERR "Exception %llu at RIP=%p\n", frame->int_no, (void*)frame->rip);
+    /* Hardware IRQs (vectors 32-47): send EOI and return */
+    if (frame->int_no >= 32 && frame->int_no <= 47) {
+        /* PIT timer (vector 32) - increment tick counter */
+        if (frame->int_no == 32) {
+            arch_timer_tick();
+        }
+        
+        /* PS/2 Keyboard (vector 33) or Mouse (vector 44) */
+        if (frame->int_no == 33 || frame->int_no == 44) {
+            extern void ps2_poll(void);
+            ps2_poll();
+        }
+        
+        /* Send End-of-Interrupt to Local APIC (HHDM mapped) */
+        volatile uint32_t *lapic_eoi = (volatile uint32_t *)(0xFFFF800000000000ULL + 0xFEE000B0UL);
+        *lapic_eoi = 0;
+        
+        return; /* Return to interrupted code */
+    }
+    
+    /* Syscall (vector 128): just return for now */
+    if (frame->int_no == 128) {
+        return;
+    }
+    
+    /* Real exception (0-31): print and halt */
+    exc_serial_puts("\n!!! EXCEPTION ");
+    exc_serial_puthex(frame->int_no);
+    exc_serial_puts(" at RIP=");
+    exc_serial_puthex(frame->rip);
+    exc_serial_puts(" ERR=");
+    exc_serial_puthex(frame->err_code);
+    exc_serial_puts("\n");
     
     if (frame->int_no == 14) {
         /* Page fault */
         uint64_t cr2;
         asm volatile("mov %%cr2, %0" : "=r"(cr2));
-        printk(KERN_ERR "Page fault at address %p\n", (void*)cr2);
+        exc_serial_puts("  CR2 (fault addr)=");
+        exc_serial_puthex(cr2);
+        exc_serial_puts("\n");
     }
     
+    exc_serial_puts("  RSP=");
+    exc_serial_puthex(frame->rsp);
+    exc_serial_puts(" CS=");
+    exc_serial_puthex(frame->cs);
+    exc_serial_puts("\n");
+    
     /* Halt on exception for now */
-    arch_halt();
+    for (;;) asm volatile("cli; hlt");
 }

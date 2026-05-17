@@ -72,7 +72,11 @@ extern void term_resize(struct terminal *t, int pixel_w, int pixel_h);
 /* Wallpaper Manager                                                     */
 /* ===================================================================== */
 #define NUM_WALLPAPERS 10
+#if defined(ARCH_X86_64)
+static int current_wallpaper = 5; /* 5 = Indigo Night gradient (skip JPEG decode on x86_64) */
+#else
 static int current_wallpaper = 0; /* 0 = Landscape (default image) */
+#endif
 
 /* Wallpaper types: 0 = gradient, 1 = image */
 /* Wallpaper types: 0 = gradient, 1 = image */
@@ -278,8 +282,8 @@ static int snake_score = 0;
 static int snake_game_over = 0;
 
 /* Mouse state (global for hover effects) */
-static int mouse_x = 512, mouse_y = 384;
-static int mouse_buttons = 0;
+volatile int mouse_x = 512, mouse_y = 384;
+volatile int mouse_buttons = 0;
 
 /* Trig tables for Clock (fixed point 8.8, scale 256) */
 /* 0..59 corresponds to 0..360 degrees clockwise from top */
@@ -2356,21 +2360,33 @@ static void draw_window(struct window *win) {
       gui_draw_line(x1, y1, x2, y2, 0x303030);
     }
 
+    /* Get time */
+#if defined(ARCH_X86_64)
+    uint8_t raw_h, raw_m, raw_s;
+    __asm__ volatile("outb %0, $0x70" : : "a"((uint8_t)0x04));
+    __asm__ volatile("inb $0x71, %0" : "=a"(raw_h));
+    __asm__ volatile("outb %0, $0x70" : : "a"((uint8_t)0x02));
+    __asm__ volatile("inb $0x71, %0" : "=a"(raw_m));
+    __asm__ volatile("outb %0, $0x70" : : "a"((uint8_t)0x00));
+    __asm__ volatile("inb $0x71, %0" : "=a"(raw_s));
+    int s = ((raw_s >> 4) * 10 + (raw_s & 0x0F));
+    int m = ((raw_m >> 4) * 10 + (raw_m & 0x0F));
+    int h = ((raw_h >> 4) * 10 + (raw_h & 0x0F));
+    int tz_offset = -5;
+    h = (h + tz_offset + 24) % 24;
+    h = h % 12;
+    if (h == 0) h = 12;
+#else
     /* Get time from PL031 RTC at 0x09010000 (QEMU virt) */
-    /* This provides Unix timestamp (seconds since 1970) */
     volatile uint32_t *pl031_data = (volatile uint32_t *)0x09010000;
     uint64_t secs = *pl031_data;
-
-    /* Apply timezone offset (e.g. -5 for EST) */
-    /* Default to UTC for now, or maybe -5 for user */
     int tz_offset = -5;
     secs += tz_offset * 3600;
-
     int s = secs % 60;
     int m = (secs / 60) % 60;
     int h = (secs / 3600) % 12;
-    if (h == 0)
-      h = 12;
+    if (h == 0) h = 12;
+#endif
 
     /* Hour Hand */
     int h_idx = (h * 5 + m / 12) % 60;
@@ -2516,8 +2532,22 @@ static void draw_menu_bar(void) {
   /* Vib-OS name (bold) */
   gui_draw_string(36, 6, "Vib-OS", 0xFFFFFF, 0x303038);
 
-  /* Clock on right - compute from PL031 RTC */
+  /* Clock on right */
   {
+#if defined(ARCH_X86_64)
+    /* Read CMOS RTC via port I/O (0x70 = index, 0x71 = data) */
+    uint8_t raw_hrs, raw_mins;
+    __asm__ volatile("outb %0, $0x70" : : "a"((uint8_t)0x04));
+    __asm__ volatile("inb $0x71, %0" : "=a"(raw_hrs));
+    __asm__ volatile("outb %0, $0x70" : : "a"((uint8_t)0x02));
+    __asm__ volatile("inb $0x71, %0" : "=a"(raw_mins));
+    /* BCD to binary */
+    int hrs = ((raw_hrs >> 4) * 10 + (raw_hrs & 0x0F));
+    int mins = ((raw_mins >> 4) * 10 + (raw_mins & 0x0F));
+    /* Timezone offset */
+    int tz_offset = -5;
+    hrs = (hrs + tz_offset + 24) % 24;
+#else
     /* Read PL031 RTC at 0x09010000 */
     volatile uint32_t *pl031_data = (volatile uint32_t *)0x09010000;
     uint64_t secs = *pl031_data;
@@ -2529,6 +2559,7 @@ static void draw_menu_bar(void) {
     /* Convert to HH:MM */
     int hrs = (secs / 3600) % 24;
     int mins = (secs / 60) % 60;
+#endif
 
     char time_str[6];
     time_str[0] = '0' + (hrs / 10);
@@ -3105,20 +3136,12 @@ void compositor_mark_full_redraw(void) {
   g_dirty_count = 0;
 }
 
-/* Optimized memcpy for scanlines */
+/* Optimized memcpy for scanlines - SAFE 32-bit version for WC memory */
 static inline void fast_memcpy_line(uint32_t *dst, uint32_t *src, int width) {
-  /* Use 64-bit copies for better performance */
-  uint64_t *d64 = (uint64_t *)dst;
-  uint64_t *s64 = (uint64_t *)src;
-  int count = width / 2;
-
-  for (int i = 0; i < count; i++) {
-    d64[i] = s64[i];
-  }
-
-  /* Handle odd pixel */
-  if (width & 1) {
-    dst[width - 1] = src[width - 1];
+  /* Do not use 64-bit copies on framebuffer memory unless guaranteed 8-byte aligned.
+   * Write-combining memory throws #GP on unaligned 64-bit accesses. */
+  for (int i = 0; i < width; i++) {
+    dst[i] = src[i];
   }
 }
 
@@ -3181,11 +3204,19 @@ void gui_compose(void) {
     draw_window(draw_order[i]);
   }
 
-  /* Draw cursor to backbuffer BEFORE blit */
-  gui_draw_cursor();
+  static int old_cursor_x = -1, old_cursor_y = -1;
 
   /* Smart frame buffer update */
   if (primary_display.backbuffer && primary_display.framebuffer) {
+    /* 1. Erase old cursor by copying from backbuffer to framebuffer */
+    if (old_cursor_x >= 0 && old_cursor_y >= 0) {
+      blit_region(old_cursor_x, old_cursor_y, 12, 19); /* CURSOR_WIDTH, CURSOR_HEIGHT */
+    }
+
+    /* Always full-redraw: dirty-region tracking misses window-move source
+     * rectangles, producing ghost trails when dragging or fast cursor
+     * movement. With KVM the full copy is cheap (~3MB/frame). */
+    g_full_redraw = 1;
     if (g_full_redraw || g_dirty_count == 0) {
       /* Full frame update - use ultra-fast unrolled copy */
       uint64_t *src = (uint64_t *)primary_display.backbuffer;
@@ -3219,6 +3250,13 @@ void gui_compose(void) {
         }
       }
     }
+
+    /* 2. Draw new cursor directly to framebuffer */
+    gui_draw_cursor();
+
+    /* 3. Save new cursor position for next frame */
+    old_cursor_x = mouse_x;
+    old_cursor_y = mouse_y;
 
     /* Memory barrier */
 #ifdef ARCH_ARM64
@@ -3258,19 +3296,22 @@ static const uint8_t cursor_data[CURSOR_HEIGHT][CURSOR_WIDTH] = {
     {0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0},
 };
 
-/* Draw cursor directly to backbuffer - no save/restore needed since we redraw
- * every frame */
+/* Draw cursor directly to the visible framebuffer. The compositor blits the
+ * backbuffer to the framebuffer first, then calls us; drawing to the
+ * backbuffer here would be wiped on the next frame's draw_desktop() before
+ * ever reaching the screen. */
 void gui_draw_cursor(void) {
-  extern void mouse_get_position(int *x, int *y);
-  int cx, cy;
-  mouse_get_position(&cx, &cy);
+  int cx = mouse_x;
+  int cy = mouse_y;
 
-  /* Update global mouse position for event handling */
-  mouse_x = cx;
-  mouse_y = cy;
+  static int last_cx = -1, last_cy = -1;
+  if (cx != last_cx || cy != last_cy) {
+    printk(KERN_DEBUG "DRAW_CURSOR: %d, %d\n", cx, cy);
+    last_cx = cx;
+    last_cy = cy;
+  }
 
-  /* Draw cursor to backbuffer (not framebuffer!) */
-  uint32_t *target = primary_display.backbuffer;
+  uint32_t *target = primary_display.framebuffer;
   if (!target)
     return;
 
@@ -3286,7 +3327,7 @@ void gui_draw_cursor(void) {
       int py = cy + row;
       if (px >= 0 && px < (int)primary_display.width && py >= 0 &&
           py < (int)primary_display.height) {
-        uint32_t color = (pixel == 1) ? 0x00000000 : 0x00FFFFFF;
+        uint32_t color = (pixel == 1) ? 0xFF000000 : 0xFFFFFFFF;
         target[py * pitch + px] = color;
       }
     }

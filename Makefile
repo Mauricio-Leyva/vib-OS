@@ -6,8 +6,13 @@
 # ============================================================================
 
 # Target architecture
-ARCH := arm64
+ARCH ?= arm64
+
+ifeq ($(ARCH), arm64)
 TARGET := aarch64-elf
+else
+TARGET := x86_64-elf
+endif
 
 # Directories
 ROOT_DIR := $(shell pwd)
@@ -51,6 +56,8 @@ else
     OBJDUMP := llvm-objdump
 endif
 
+# Architecture-specific flags and emulation config
+ifeq ($(ARCH), arm64)
 # Cross-compilation target
 CROSS_TARGET := --target=aarch64-unknown-none-elf
 
@@ -64,6 +71,8 @@ CFLAGS_KERNEL := $(CFLAGS_COMMON) $(CROSS_TARGET) \
                  -mgeneral-regs-only \
                  -fno-builtin -nostdlib -nostdinc \
                  -DARCH_ARM64
+
+CFLAGS_MEDIA := $(CFLAGS_COMMON) $(CROSS_TARGET) -mcpu=cortex-a72 -I$(KERNEL_DIR)/include -fno-builtin -nostdlib -nostdinc
 
 CFLAGS_USER := -Wall -Wextra -O2 -g \
                --target=aarch64-linux-musl \
@@ -80,6 +89,37 @@ QEMU_FLAGS := -M $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) \
               -nographic -serial mon:stdio \
               -drive if=none,id=hd0,format=raw,file=$(IMAGE_DIR)/unixos.img \
               -device virtio-blk-device,drive=hd0
+else
+# x86_64 Cross-compilation target
+CROSS_TARGET := --target=x86_64-unknown-none-elf
+
+# x86_64 Compiler flags
+CFLAGS_COMMON := -Wall -Wextra -Wno-unused-function -ffreestanding -fstack-protector-strong \
+                 -fno-pic -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mcmodel=kernel -O2 -g
+
+CFLAGS_KERNEL := $(CFLAGS_COMMON) $(CROSS_TARGET) \
+                 -I$(KERNEL_DIR)/include -I$(KERNEL_DIR) \
+                 -fno-builtin -nostdlib -nostdinc \
+                 -DARCH_X86_64
+
+CFLAGS_MEDIA := $(CFLAGS_COMMON) $(CROSS_TARGET) -I$(KERNEL_DIR)/include -fno-builtin -nostdlib -nostdinc
+
+CFLAGS_USER := -Wall -Wextra -O2 -g \
+               --target=x86_64-linux-musl \
+               --sysroot=$(SYSROOT)
+
+LDFLAGS_KERNEL := -nostdlib -static -T $(KERNEL_DIR)/linker_x86_64_limine.ld -z max-page-size=0x1000
+
+# x86_64 QEMU configuration
+QEMU := qemu-system-x86_64
+QEMU_MACHINE := q35
+QEMU_CPU := max
+QEMU_MEMORY := 4G
+QEMU_FLAGS := -M $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) \
+              -nographic -serial mon:stdio \
+              -drive if=none,id=hd0,format=raw,file=$(IMAGE_DIR)/unixos.img \
+              -device virtio-blk-pci,drive=hd0
+endif
 
 # ============================================================================
 # Main Targets
@@ -139,14 +179,24 @@ $(IMAGE_DIR):
 # Kernel Build
 # ============================================================================
 
+ifeq ($(ARCH), arm64)
 KERNEL_SOURCES := $(shell find $(KERNEL_DIR) -name '*.c' -o -name '*.S' 2>/dev/null | grep -v '/x86_64/' | grep -v '/x86/')
 # Also include ARM64-specific assembly
 KERNEL_SOURCES += $(shell find $(KERNEL_DIR)/arch/arm64 -name '*.S' 2>/dev/null)
+else
+KERNEL_SOURCES := $(shell find $(KERNEL_DIR) -name '*.c' 2>/dev/null | grep -v '/arm64/' | grep -v '/x86/')
+# Also include x86_64-specific assembly
+KERNEL_SOURCES += $(shell find $(KERNEL_DIR)/arch/x86_64 -name '*.S' 2>/dev/null)
+endif
 KERNEL_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(filter %.c,$(KERNEL_SOURCES)))
 KERNEL_OBJECTS += $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/kernel/%.o,$(filter %.S,$(KERNEL_SOURCES)))
 
 # Include drivers in the kernel
+ifeq ($(ARCH), arm64)
 DRIVER_SOURCES := $(shell find $(DRIVERS_DIR) -name '*.c' 2>/dev/null)
+else
+DRIVER_SOURCES := $(shell find $(DRIVERS_DIR) -name '*.c' 2>/dev/null | grep -v 'uart/')
+endif
 DRIVER_OBJECTS := $(patsubst $(DRIVERS_DIR)/%.c,$(BUILD_DIR)/drivers/%.o,$(DRIVER_SOURCES))
 
 ALL_KERNEL_OBJECTS := $(KERNEL_OBJECTS) $(DRIVER_OBJECTS)
@@ -158,9 +208,9 @@ kernel: $(BUILD_DIR) $(ALL_KERNEL_OBJECTS) $(KERNEL_BINARY)
 $(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.c
 	@mkdir -p $(dir $@)
 	@echo "[CC] $<"
-	@# Media files need FP support, compile without -mgeneral-regs-only
+	@# Media files need FP support, compile without -mgeneral-regs-only on arm64
 	@if echo "$<" | grep -q "/media/"; then \
-		$(CC) $(CFLAGS_COMMON) $(CROSS_TARGET) -mcpu=cortex-a72 -I$(KERNEL_DIR)/include -fno-builtin -nostdlib -nostdinc -c $< -o $@; \
+		$(CC) $(CFLAGS_MEDIA) -c $< -o $@; \
 	else \
 		$(CC) $(CFLAGS_KERNEL) -c $< -o $@; \
 	fi
@@ -236,7 +286,7 @@ runtimes: $(BUILD_DIR) libc
 
 image: $(IMAGE_DIR) kernel drivers
 	@echo "[IMAGE] Creating bootable disk image..."
-	@./scripts/create-boot-image.sh $(BUILD_DIR) $(IMAGE_DIR)
+	@./scripts/create-boot-image.sh $(BUILD_DIR) $(IMAGE_DIR) $(ARCH)
 	@echo "[IMAGE] Created: $(IMAGE_DIR)/unixos.img"
 
 # ============================================================================
@@ -284,11 +334,12 @@ test: kernel
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
-  QEMU_AUDIO ?= none
+  QEMU_AUDIO ?= pa
 else
   QEMU_AUDIO ?= coreaudio
 endif
 
+ifeq ($(ARCH), arm64)
 run: kernel
 	@echo "[RUN] Starting Vib-OS in QEMU..."
 	@qemu-system-aarch64 -M virt,gic-version=3 -cpu max -m 4G -nographic -kernel $(KERNEL_BINARY)
@@ -323,6 +374,44 @@ run-gpu: kernel
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
 		-serial stdio \
 		-kernel $(KERNEL_BINARY)
+else
+run: image
+	@echo "[RUN] Starting Vib-OS x86_64 in QEMU (nographic)..."
+	@qemu-system-x86_64 -M q35 -m 512M -nographic -serial mon:stdio \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+		-drive if=none,id=hd0,format=raw,file=$(IMAGE_DIR)/unixos.img \
+		-device virtio-blk-pci,drive=hd0
+
+run-gui: image
+	@echo "[RUN] Starting Vib-OS x86_64 with GUI display..."
+	@qemu-system-x86_64 -M q35 -m 512M \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+		-drive if=none,id=hd0,format=raw,file=$(IMAGE_DIR)/unixos.img \
+		-device virtio-blk-pci,drive=hd0 \
+		-device ramfb \
+		-device virtio-keyboard-pci \
+		-device virtio-tablet-pci \
+		-device virtio-net-pci,netdev=net0 \
+		-netdev user,id=net0 \
+		-audiodev $(QEMU_AUDIO),id=snd0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
+		-serial stdio
+
+run-gpu: image
+	@echo "[RUN] Starting Vib-OS x86_64 with virtio-GPU..."
+	@qemu-system-x86_64 -M q35 -m 512M \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+		-drive if=none,id=hd0,format=raw,file=$(IMAGE_DIR)/unixos.img \
+		-device virtio-blk-pci,drive=hd0 \
+		-device virtio-gpu-pci \
+		-device virtio-keyboard-pci \
+		-device virtio-tablet-pci \
+		-device virtio-net-pci,netdev=net0 \
+		-netdev user,id=net0 \
+		-audiodev $(QEMU_AUDIO),id=snd0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
+		-serial stdio
+endif
 
 # ============================================================================
 # Toolchain Setup
