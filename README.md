@@ -31,14 +31,14 @@ Vib-OS is a from-scratch, Unix-like operating system with **full multi-architect
 
 | Architecture | Boot Method | Status | Hardware |
 |--------------|-------------|--------|----------|
-| **ARM64** | Direct / UEFI | ✅| Raspberry Pi 4/5, QEMU virt, Apple Silicon (VM) |
-| **x86_64** | Direct / UEFI / BIOS | ✅  will be released soon. | Modern PCs, QEMU, VirtualBox, VMware |
+| **ARM64** | Direct / UEFI | ✅ **Working** | Raspberry Pi 4/5, QEMU virt, Apple Silicon (VM) |
+| **x86_64** | Direct / UEFI / BIOS | ✅ **Working** (QEMU + KVM) | Modern PCs, QEMU, VirtualBox, VMware |
 | **x86** | Direct / BIOS (MBR) | ✅ **Builds Successfully** | Legacy PCs, QEMU pc |
 
 ### What Works Now
 
 - ✅ **ARM64**: Fully tested and stable on QEMU and Raspberry Pi
-- ✅ **x86_64**: Kernel builds and boots successfully
+- ✅ **x86_64**: Boots and runs the full GUI on QEMU (UEFI via Limine, IDT/IOAPIC, PS/2 keyboard & mouse, framebuffer, KVM acceleration)
 - ✅ **x86 32-bit**: Kernel builds successfully (testing in progress)
 - ✅ **Architecture Abstraction Layer**: Clean separation of arch-specific code
 - ✅ **Context Switching**: Working for ARM64, x86_64, and x86
@@ -384,7 +384,7 @@ Use Qemu.
 
 ### What Works
 - ✅ ARM64 kernel boots and runs stably
-- ✅ x86_64 kernel builds successfully
+- ✅ x86_64 kernel boots and runs stably (UEFI/Limine, KVM-accelerated)
 - ✅ GUI system with windows, dock, and applications
 - ✅ File system (RamFS) with file manager
 - ✅ **EXT4 Read/Write Support** - Full implementation with block/inode allocation
@@ -393,16 +393,17 @@ Use Qemu.
 - ✅ Multi-threading via clone() syscall
 - ✅ SMP infrastructure initialized
 - ✅ **Complete sys_execve** - Loads ELF, sets up user stack, jumps to userspace
-- ✅ Input (keyboard and mouse)
+- ✅ Input (keyboard and mouse on both ARM64 virtio and x86_64 PS/2)
 - ✅ Doom runs with full graphics
 - ✅ Python and Nano language interpreters
 - ✅ Security features (spinlocks, sandbox, ASLR)
 
 ### Known Issues
 1. **Sound Support**: Intel HDA driver works but audio may be choppy in QEMU
-2. **x86_64 Testing**: Needs more real hardware testing
-3. **Network Settings UI**: Not fully implemented
-4. **Web Browser**: Basic rendering only, no full HTML parser
+2. **x86_64 Bare Metal**: Validated on QEMU + KVM; real-hardware testing pending
+3. **x86_64 Mouse**: Uses PS/2 (relative), so cursor can drift out of sync with the host pointer unless SDL grabs the mouse — virtio-tablet (absolute) would need a PCI virtio driver
+4. **Network Settings UI**: Not fully implemented
+5. **Web Browser**: Basic rendering only, no full HTML parser
 
 ### Roadmap
 - [x] ~~**Multi-core**: SMP support for multiple CPUs~~ *(Infrastructure complete)*
@@ -410,7 +411,9 @@ Use Qemu.
 - [x] ~~**Multi-threading**: Thread creation via clone()~~ *(Done)*
 - [x] ~~**EXT4 Write Support**: Full read/write with bitmap management~~ *(Done)*
 - [x] ~~**Userspace Execution**: Complete sys_execve implementation~~ *(Done)*
+- [x] ~~**x86_64 Bring-up**: Full GUI, PS/2 input, IOAPIC routing, KVM acceleration on QEMU~~ *(Done)*
 - [/] **x86 32-bit**: Complete kernel implementation
+- [ ] **x86_64 Absolute Mouse**: PCI virtio enumeration + virtio-tablet driver for host-synced cursor
 - [/] **USB Support**: Add USB mass storage and HID drivers
 - [ ] **User Accounts**: Login screen and multi-user support
 - [ ] **Package Manager**: Install/remove applications
